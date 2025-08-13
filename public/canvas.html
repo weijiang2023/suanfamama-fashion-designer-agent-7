@@ -372,345 +372,634 @@
         <div class="sketch-list" id="sketchList"></div>
     </div>
 
-    <div class="notification" id="notification"></div>
+	<div class="notification" id="notification"></div>
 
-    <script>
-        class FashionCanvas {
-            constructor() {
-                this.canvas = document.getElementById('canvas');
-                this.ctx = this.canvas.getContext('2d');
-                this.isDrawing = false;
-                this.currentTool = 'pencil';
-                this.currentColor = '#000000';
-                this.currentSize = 5;
-                this.history = [];
-                this.historyIndex = -1;
-                this.maxHistory = 50;
-                
-                this.init();
-            }
+	<script>
+		class FashionCanvas {
+			constructor() {
+				// Base canvas and overlay for preview
+				this.canvas = document.getElementById('canvas');
+				this.ctx = this.canvas.getContext('2d');
+				this.overlay = document.createElement('canvas');
+				this.overlayCtx = this.overlay.getContext('2d');
+				this.overlay.style.position = 'absolute';
+				this.overlay.style.top = '0';
+				this.overlay.style.left = '0';
+				this.overlay.style.right = '0';
+				this.overlay.style.bottom = '0';
+				this.overlay.style.pointerEvents = 'none';
+				document.querySelector('.canvas-container').appendChild(this.overlay);
 
-            init() {
-                this.resizeCanvas();
-                this.setupEventListeners();
-                this.setupTools();
-                this.saveState();
-            }
+				// State
+				this.isDrawing = false;
+				this.currentTool = 'pencil';
+				this.currentColor = '#000000';
+				this.currentSize = 5;
+				this.currentOpacity = 1;
+				this.symmetryEnabled = false;
+				this.gridEnabled = false;
+				this.textValue = '';
+				this.mannequinEnabled = false;
 
-            resizeCanvas() {
-                const rect = this.canvas.getBoundingClientRect();
-                this.canvas.width = rect.width;
-                this.canvas.height = rect.height;
-                this.ctx.fillStyle = 'white';
-                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-            }
+				// Layers (offscreen)
+				this.layers = [];
+				this.currentLayerIndex = 0;
 
-            setupEventListeners() {
-                window.addEventListener('resize', () => this.resizeCanvas());
-                
-                this.canvas.addEventListener('mousedown', (e) => this.startDrawing(e));
-                this.canvas.addEventListener('mousemove', (e) => this.draw(e));
-                this.canvas.addEventListener('mouseup', () => this.stopDrawing());
-                this.canvas.addEventListener('mouseout', () => this.stopDrawing());
-                
-                // Touch support for mobile
-                this.canvas.addEventListener('touchstart', (e) => {
-                    e.preventDefault();
-                    this.startDrawing(e.touches[0]);
-                });
-                this.canvas.addEventListener('touchmove', (e) => {
-                    e.preventDefault();
-                    this.draw(e.touches[0]);
-                });
-                this.canvas.addEventListener('touchend', () => this.stopDrawing());
-            }
+				// History of composite images
+				this.history = [];
+				this.historyIndex = -1;
+				this.maxHistory = 20;
 
-            setupTools() {
-                // Tool selection
-                document.querySelectorAll('[data-tool]').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        document.querySelectorAll('[data-tool]').forEach(b => b.classList.remove('active'));
-                        e.target.classList.add('active');
-                        this.currentTool = e.target.dataset.tool;
-                    });
-                });
+				// Shape temp state
+				this.shapeStart = null;
+				this.measureStart = null;
 
-                // Color selection
-                document.querySelectorAll('[data-color]').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        document.querySelectorAll('[data-color]').forEach(b => b.classList.remove('active'));
-                        e.target.classList.add('active');
-                        this.currentColor = e.target.dataset.color;
-                    });
-                });
+				this.init();
+			}
 
-                // Size control
-                const sizeSlider = document.getElementById('sizeSlider');
-                const sizeValue = document.getElementById('sizeValue');
-                sizeSlider.addEventListener('input', (e) => {
-                    this.currentSize = parseInt(e.target.value);
-                    sizeValue.textContent = this.currentSize + 'px';
-                });
+			init() {
+				this.resizeCanvas();
+				this.ensureAtLeastOneLayer();
+				this.bindBaseEvents();
+				this.setupBasicToolbar();
+				this.buildAdvancedUI();
+				this.drawComposite();
+				this.saveState();
+			}
 
-                // Action buttons
-                document.getElementById('clearBtn').addEventListener('click', () => this.clearCanvas());
-                document.getElementById('undoBtn').addEventListener('click', () => this.undo());
-                document.getElementById('redoBtn').addEventListener('click', () => this.redo());
-                document.getElementById('saveBtn').addEventListener('click', () => this.saveSketch());
-                document.getElementById('loadBtn').addEventListener('click', () => this.loadSketch());
-                document.getElementById('listBtn').addEventListener('click', () => this.listSketches());
-                document.getElementById('deleteBtn').addEventListener('click', () => this.deleteSketch());
-            }
+			// Canvas sizing and layers
+			resizeCanvas() {
+				const rect = this.canvas.getBoundingClientRect();
+				this.canvas.width = rect.width;
+				this.canvas.height = rect.height;
+				this.overlay.width = rect.width;
+				this.overlay.height = rect.height;
+				this.resizeLayers(rect.width, rect.height);
+				this.drawComposite();
+			}
 
-            startDrawing(e) {
-                this.isDrawing = true;
-                this.ctx.beginPath();
-                this.ctx.moveTo(e.clientX - this.canvas.offsetLeft, e.clientY - this.canvas.offsetTop);
-            }
+			resizeLayers(w, h) {
+				this.layers.forEach(layer => {
+					const prev = document.createElement('canvas');
+					prev.width = layer.width;
+					prev.height = layer.height;
+					prev.getContext('2d').drawImage(layer, 0, 0);
+					layer.width = w;
+					layer.height = h;
+					layer.getContext('2d').drawImage(prev, 0, 0);
+				});
+			}
 
-            draw(e) {
-                if (!this.isDrawing) return;
+			ensureAtLeastOneLayer() {
+				if (this.layers.length === 0) {
+					this.addLayer('Layer 1');
+				}
+			}
 
-                const rect = this.canvas.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const y = e.clientY - rect.top;
+			addLayer(name = `Layer ${this.layers.length + 1}`) {
+				const layer = document.createElement('canvas');
+				layer.width = this.canvas.width;
+				layer.height = this.canvas.height;
+				layer.dataset.name = name;
+				this.layers.push(layer);
+				this.currentLayerIndex = this.layers.length - 1;
+				this.refreshLayersUI();
+				this.drawComposite();
+			}
 
-                this.ctx.lineTo(x, y);
-                this.ctx.strokeStyle = this.currentColor;
-                this.ctx.lineWidth = this.currentSize;
-                this.ctx.lineCap = 'round';
-                this.ctx.lineJoin = 'round';
+			deleteCurrentLayer() {
+				if (this.layers.length <= 1) return;
+				this.layers.splice(this.currentLayerIndex, 1);
+				this.currentLayerIndex = Math.max(0, this.currentLayerIndex - 1);
+				this.refreshLayersUI();
+				this.drawComposite();
+			}
 
-                if (this.currentTool === 'eraser') {
-                    this.ctx.globalCompositeOperation = 'destination-out';
-                } else {
-                    this.ctx.globalCompositeOperation = 'source-over';
-                }
+			moveLayer(delta) {
+				const i = this.currentLayerIndex;
+				const j = i + delta;
+				if (j < 0 || j >= this.layers.length) return;
+				const tmp = this.layers[i];
+				this.layers[i] = this.layers[j];
+				this.layers[j] = tmp;
+				this.currentLayerIndex = j;
+				this.refreshLayersUI();
+				this.drawComposite();
+			}
 
-                this.ctx.stroke();
-            }
+			get currentLayerCtx() {
+				return this.layers[this.currentLayerIndex].getContext('2d');
+			}
 
-            stopDrawing() {
-                if (this.isDrawing) {
-                    this.isDrawing = false;
-                    this.saveState();
-                }
-            }
+			// Events
+			bindBaseEvents() {
+				window.addEventListener('resize', () => this.resizeCanvas());
+				// Pointer events
+				this.canvas.addEventListener('mousedown', (e) => this.onPointerDown(e));
+				this.canvas.addEventListener('mousemove', (e) => this.onPointerMove(e));
+				this.canvas.addEventListener('mouseup', () => this.onPointerUp());
+				this.canvas.addEventListener('mouseout', () => this.onPointerUp());
+				// Touch
+				this.canvas.addEventListener('touchstart', (e) => { e.preventDefault(); this.onPointerDown(e.touches[0]); });
+				this.canvas.addEventListener('touchmove', (e) => { e.preventDefault(); this.onPointerMove(e.touches[0]); });
+				this.canvas.addEventListener('touchend', () => this.onPointerUp());
+			}
 
-            saveState() {
-                const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
-                
-                // Remove future history if we're not at the end
-                if (this.historyIndex < this.history.length - 1) {
-                    this.history = this.history.slice(0, this.historyIndex + 1);
-                }
-                
-                this.history.push(imageData);
-                this.historyIndex++;
-                
-                // Limit history size
-                if (this.history.length > this.maxHistory) {
-                    this.history.shift();
-                    this.historyIndex--;
-                }
-            }
+			// Toolbar (existing basic)
+			setupBasicToolbar() {
+				// Tool selection
+				document.querySelectorAll('[data-tool]').forEach(btn => {
+					btn.addEventListener('click', (e) => {
+						document.querySelectorAll('[data-tool]').forEach(b => b.classList.remove('active'));
+						e.target.classList.add('active');
+						this.currentTool = e.target.dataset.tool;
+					});
+				});
 
-            undo() {
-                if (this.historyIndex > 0) {
-                    this.historyIndex--;
-                    this.ctx.putImageData(this.history[this.historyIndex], 0, 0);
-                }
-            }
+				// Color palette
+				document.querySelectorAll('[data-color]').forEach(btn => {
+					btn.addEventListener('click', (e) => {
+						document.querySelectorAll('[data-color]').forEach(b => b.classList.remove('active'));
+						e.target.classList.add('active');
+						this.currentColor = e.target.dataset.color;
+					});
+				});
 
-            redo() {
-                if (this.historyIndex < this.history.length - 1) {
-                    this.historyIndex++;
-                    this.ctx.putImageData(this.history[this.historyIndex], 0, 0);
-                }
-            }
+				// Size control
+				const sizeSlider = document.getElementById('sizeSlider');
+				const sizeValue = document.getElementById('sizeValue');
+				sizeSlider.addEventListener('input', (e) => {
+					this.currentSize = parseInt(e.target.value);
+					sizeValue.textContent = this.currentSize + 'px';
+				});
 
-            clearCanvas() {
-                this.ctx.fillStyle = 'white';
-                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-                this.saveState();
-            }
+				// Actions
+				document.getElementById('clearBtn').addEventListener('click', () => this.clearCanvas());
+				document.getElementById('undoBtn').addEventListener('click', () => this.undo());
+				document.getElementById('redoBtn').addEventListener('click', () => this.redo());
+				document.getElementById('saveBtn').addEventListener('click', () => this.saveSketch());
+				document.getElementById('loadBtn').addEventListener('click', () => this.loadSketch());
+				document.getElementById('listBtn').addEventListener('click', () => this.listSketches());
+				document.getElementById('deleteBtn').addEventListener('click', () => this.deleteSketch());
+			}
 
-            async saveSketch() {
-                const projectId = document.getElementById('projectId').value;
-                const sketchName = document.getElementById('sketchName').value;
-                
-                if (!projectId || !sketchName) {
-                    this.showNotification('Please enter both Project ID and Sketch Name', 'error');
-                    return;
-                }
+			// Advanced UI built dynamically
+			buildAdvancedUI() {
+				// Create advanced toolbar panel
+				const toolbar = document.createElement('div');
+				toolbar.style.position = 'fixed';
+				toolbar.style.left = '7.5rem';
+				toolbar.style.top = '80px';
+				toolbar.style.background = 'rgba(255,255,255,0.95)';
+				toolbar.style.backdropFilter = 'blur(10px)';
+				toolbar.style.padding = '0.75rem 1rem';
+				toolbar.style.borderRadius = '12px';
+				toolbar.style.boxShadow = '0 4px 20px rgba(0,0,0,0.1)';
+				toolbar.style.display = 'flex';
+				toolbar.style.flexWrap = 'wrap';
+				toolbar.style.gap = '0.5rem';
+				toolbar.style.zIndex = '1100';
 
-                try {
-                    const imageData = this.canvas.toDataURL('image/png');
-                    const sketchId = `sketch-${Date.now()}`;
-                    
-                    const response = await fetch('/api/sketches', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            id: sketchId,
-                            name: sketchName,
-                            data: imageData,
-                            projectId: projectId
-                        })
-                    });
+				const mkBtn = (label, title, onClick) => {
+					const b = document.createElement('button');
+					b.className = 'tool-btn';
+					b.style.width = '44px';
+					b.style.height = '44px';
+					b.title = title;
+					b.textContent = label;
+					b.addEventListener('click', onClick);
+					return b;
+				};
 
-                    if (response.ok) {
-                        this.showNotification('Sketch saved successfully!');
-                        document.getElementById('sketchName').value = '';
-                    } else {
-                        throw new Error('Failed to save sketch');
-                    }
-                } catch (error) {
-                    this.showNotification('Error saving sketch: ' + error.message, 'error');
-                }
-            }
+				// Drawing and shape tools
+				toolbar.appendChild(mkBtn('—', 'Line', () => this.currentTool = 'line'));
+				toolbar.appendChild(mkBtn('▭', 'Rectangle', () => this.currentTool = 'rect'));
+				toolbar.appendChild(mkBtn('◯', 'Ellipse', () => this.currentTool = 'ellipse'));
+				toolbar.appendChild(mkBtn('T', 'Text', () => this.currentTool = 'text'));
+				toolbar.appendChild(mkBtn('📏', 'Measure', () => this.currentTool = 'measure'));
 
-            async loadSketch() {
-                const projectId = document.getElementById('projectId').value;
-                const sketchName = document.getElementById('sketchName').value;
-                
-                if (!projectId || !sketchName) {
-                    this.showNotification('Please enter both Project ID and Sketch Name', 'error');
-                    return;
-                }
+				// Symmetry toggle
+				const sym = mkBtn('⇆', 'Toggle symmetry', () => {
+					this.symmetryEnabled = !this.symmetryEnabled;
+					sym.classList.toggle('active', this.symmetryEnabled);
+				});
+				toolbar.appendChild(sym);
 
-                try {
-                    // First, list sketches to find the one with matching name
-                    const listResponse = await fetch(`/api/projects/${projectId}/sketches`);
-                    if (!listResponse.ok) throw new Error('Failed to fetch sketches');
-                    
-                    const { sketches } = await listResponse.json();
-                    const sketch = sketches.find(s => s.name === sketchName);
-                    
-                    if (!sketch) {
-                        this.showNotification('Sketch not found', 'error');
-                        return;
-                    }
+				// Grid toggle
+				const grid = mkBtn('#', 'Toggle grid', () => {
+					this.gridEnabled = !this.gridEnabled;
+					grid.classList.toggle('active', this.gridEnabled);
+					this.drawComposite();
+				});
+				toolbar.appendChild(grid);
 
-                    // Load the sketch data
-                    const loadResponse = await fetch(`/api/sketches/${sketch.id}`);
-                    if (!loadResponse.ok) throw new Error('Failed to load sketch');
-                    
-                    const { sketch: sketchData } = await loadResponse.json();
-                    
-                    // Create an image from the data URL
-                    const img = new Image();
-                    img.onload = () => {
-                        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                        this.ctx.drawImage(img, 0, 0);
-                        this.saveState();
-                        this.showNotification('Sketch loaded successfully!');
-                    };
-                    img.src = sketchData.data;
-                    
-                } catch (error) {
-                    this.showNotification('Error loading sketch: ' + error.message, 'error');
-                }
-            }
+				// Mannequin toggle
+				const man = mkBtn('🧍', 'Toggle mannequin guide', () => {
+					this.mannequinEnabled = !this.mannequinEnabled;
+					man.classList.toggle('active', this.mannequinEnabled);
+					this.drawComposite();
+				});
+				toolbar.appendChild(man);
 
-            async listSketches() {
-                const projectId = document.getElementById('projectId').value;
-                
-                if (!projectId) {
-                    this.showNotification('Please enter Project ID', 'error');
-                    return;
-                }
+				// Color picker
+				const color = document.createElement('input');
+				color.type = 'color';
+				color.value = this.currentColor;
+				color.style.height = '44px';
+				color.style.width = '44px';
+				color.style.border = 'none';
+				color.style.borderRadius = '8px';
+				color.addEventListener('input', (e) => this.currentColor = e.target.value);
+				toolbar.appendChild(color);
 
-                try {
-                    const response = await fetch(`/api/projects/${projectId}/sketches`);
-                    if (!response.ok) throw new Error('Failed to fetch sketches');
-                    
-                    const { sketches } = await response.json();
-                    this.displaySketchList(sketches);
-                    
-                    if (sketches.length === 0) {
-                        this.showNotification('No sketches found for this project');
-                    }
-                } catch (error) {
-                    this.showNotification('Error listing sketches: ' + error.message, 'error');
-                }
-            }
+				// Opacity slider
+				const opWrap = document.createElement('div');
+				opWrap.style.display = 'flex';
+				opWrap.style.alignItems = 'center';
+				opWrap.style.gap = '0.25rem';
+				const op = document.createElement('input');
+				op.type = 'range'; op.min = '0'; op.max = '1'; op.step = '0.05'; op.value = '1';
+				op.style.width = '120px';
+				op.addEventListener('input', (e) => this.currentOpacity = parseFloat(e.target.value));
+				const opLbl = document.createElement('span'); opLbl.textContent = 'Opacity'; opLbl.style.color = '#7f8c8d'; opLbl.style.fontSize = '0.8rem';
+				opWrap.appendChild(opLbl); opWrap.appendChild(op);
+				toolbar.appendChild(opWrap);
 
-            displaySketchList(sketches) {
-                const listContainer = document.getElementById('sketchList');
-                listContainer.innerHTML = '';
-                
-                sketches.forEach(sketch => {
-                    const item = document.createElement('div');
-                    item.className = 'sketch-item';
-                    item.innerHTML = `
-                        <h4>${sketch.name}</h4>
-                        <p>Created: ${new Date(sketch.createdAt).toLocaleDateString()}</p>
-                    `;
-                    item.addEventListener('click', () => {
-                        document.getElementById('sketchName').value = sketch.name;
-                    });
-                    listContainer.appendChild(item);
-                });
-            }
+				// Text input
+				const txt = document.createElement('input');
+				txt.type = 'text'; txt.placeholder = 'Text…';
+				txt.style.height = '44px'; txt.style.borderRadius = '8px'; txt.style.border = '1px solid #ecf0f1'; txt.style.padding = '0 0.5rem';
+				txt.addEventListener('input', (e) => this.textValue = e.target.value);
+				toolbar.appendChild(txt);
 
-            async deleteSketch() {
-                const projectId = document.getElementById('projectId').value;
-                const sketchName = document.getElementById('sketchName').value;
-                
-                if (!projectId || !sketchName) {
-                    this.showNotification('Please enter both Project ID and Sketch Name', 'error');
-                    return;
-                }
+				// Export PNG
+				toolbar.appendChild(mkBtn('⬇', 'Export PNG', () => this.exportPNG()));
+				// Import image
+				const file = document.createElement('input'); file.type = 'file'; file.accept = 'image/*'; file.style.display = 'none';
+				file.addEventListener('change', (e) => this.importImage(e));
+				document.body.appendChild(file);
+				toolbar.appendChild(mkBtn('⬆', 'Import Image', () => file.click()));
 
-                try {
-                    // First, list sketches to find the one with matching name
-                    const listResponse = await fetch(`/api/projects/${projectId}/sketches`);
-                    if (!listResponse.ok) throw new Error('Failed to fetch sketches');
-                    
-                    const { sketches } = await listResponse.json();
-                    const sketch = sketches.find(s => s.name === sketchName);
-                    
-                    if (!sketch) {
-                        this.showNotification('Sketch not found', 'error');
-                        return;
-                    }
+				document.body.appendChild(toolbar);
 
-                    // Delete the sketch
-                    const deleteResponse = await fetch(`/api/sketches/${sketch.id}`, {
-                        method: 'DELETE'
-                    });
-                    
-                    if (deleteResponse.ok) {
-                        this.showNotification('Sketch deleted successfully!');
-                        document.getElementById('sketchName').value = '';
-                        this.listSketches(); // Refresh the list
-                    } else {
-                        throw new Error('Failed to delete sketch');
-                    }
-                } catch (error) {
-                    this.showNotification('Error deleting sketch: ' + error.message, 'error');
-                }
-            }
+				// Layers UI in project panel
+				const panel = document.querySelector('.project-panel');
+				const layersHdr = document.createElement('h3'); layersHdr.textContent = 'Layers'; panel.appendChild(layersHdr);
+				const layerControls = document.createElement('div'); layerControls.style.display = 'grid'; layerControls.style.gridTemplateColumns = 'repeat(4, 1fr)'; layerControls.style.gap = '0.5rem';
+				const newL = document.createElement('button'); newL.className = 'btn'; newL.textContent = 'New'; newL.addEventListener('click', () => this.addLayer());
+				const delL = document.createElement('button'); delL.className = 'btn danger'; delL.textContent = 'Delete'; delL.addEventListener('click', () => this.deleteCurrentLayer());
+				const upL = document.createElement('button'); upL.className = 'btn secondary'; upL.textContent = 'Up'; upL.addEventListener('click', () => this.moveLayer(1));
+				const downL = document.createElement('button'); downL.className = 'btn secondary'; downL.textContent = 'Down'; downL.addEventListener('click', () => this.moveLayer(-1));
+				layerControls.appendChild(newL); layerControls.appendChild(delL); layerControls.appendChild(upL); layerControls.appendChild(downL);
+				panel.appendChild(layerControls);
+				this.layersList = document.createElement('div'); this.layersList.className = 'sketch-list'; panel.appendChild(this.layersList);
+				this.refreshLayersUI();
+			}
 
-            showNotification(message, type = 'success') {
-                const notification = document.getElementById('notification');
-                notification.textContent = message;
-                notification.className = `notification ${type}`;
-                notification.classList.add('show');
-                
-                setTimeout(() => {
-                    notification.classList.remove('show');
-                }, 3000);
-            }
-        }
+			refreshLayersUI() {
+				if (!this.layersList) return;
+				this.layersList.innerHTML = '';
+				this.layers.forEach((layer, idx) => {
+					const item = document.createElement('div');
+					item.className = 'sketch-item';
+					item.innerHTML = `<h4>${layer.dataset.name || 'Layer ' + (idx+1)}</h4><p>${idx === this.currentLayerIndex ? 'Active' : 'Click to select'}</p>`;
+					item.addEventListener('click', () => { this.currentLayerIndex = idx; this.refreshLayersUI(); });
+					this.layersList.appendChild(item);
+				});
+			}
 
-        // Initialize the canvas when the page loads
-        document.addEventListener('DOMContentLoaded', () => {
-            new FashionCanvas();
-        });
-    </script>
+			// Pointer handling and tools
+			getPointer(e) {
+				const rect = this.canvas.getBoundingClientRect();
+				return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+			}
+
+			onPointerDown(e) {
+				const p = this.getPointer(e);
+				this.isDrawing = true;
+				this.overlayCtx.clearRect(0,0,this.overlay.width,this.overlay.height);
+				if (['line','rect','ellipse','measure'].includes(this.currentTool)) {
+					this.shapeStart = p;
+				} else if (this.currentTool === 'text') {
+					if (!this.textValue) { this.showNotification('Enter text first', 'error'); return; }
+					this.drawTextAt(p.x, p.y);
+					this.drawComposite();
+					this.saveState();
+					this.isDrawing = false;
+				} else {
+					// freehand
+					const ctx = this.currentLayerCtx;
+					ctx.beginPath();
+					ctx.moveTo(p.x, p.y);
+				}
+			}
+
+			onPointerMove(e) {
+				if (!this.isDrawing) return;
+				const p = this.getPointer(e);
+				if (['line','rect','ellipse','measure'].includes(this.currentTool)) {
+					this.drawShapePreview(this.shapeStart, p);
+					return;
+				}
+				if (['pencil','brush','eraser'].includes(this.currentTool)) {
+					this.strokeTo(p.x, p.y);
+					if (this.symmetryEnabled) {
+						const mx = this.canvas.width - p.x;
+						this.strokeTo(mx, p.y);
+					}
+					this.drawComposite();
+				}
+			}
+
+			onPointerUp() {
+				if (!this.isDrawing) return;
+				this.isDrawing = false;
+				if (['line','rect','ellipse','measure'].includes(this.currentTool) && this.shapeStart) {
+					this.commitShapeFromOverlay();
+				}
+				this.overlayCtx.clearRect(0,0,this.overlay.width,this.overlay.height);
+				this.drawComposite();
+				this.saveState();
+			}
+
+			strokeTo(x, y) {
+				const ctx = this.currentLayerCtx;
+				ctx.globalAlpha = this.currentOpacity;
+				ctx.strokeStyle = this.currentTool === 'eraser' ? 'rgba(0,0,0,1)' : this.currentColor;
+				ctx.lineWidth = this.currentSize;
+				ctx.lineCap = 'round';
+				ctx.lineJoin = 'round';
+				ctx.globalCompositeOperation = this.currentTool === 'eraser' ? 'destination-out' : 'source-over';
+				ctx.lineTo(x, y);
+				ctx.stroke();
+			}
+
+			drawShapePreview(start, end) {
+				this.overlayCtx.clearRect(0,0,this.overlay.width,this.overlay.height);
+				this.overlayCtx.globalAlpha = this.currentOpacity;
+				this.overlayCtx.strokeStyle = this.currentColor;
+				this.overlayCtx.lineWidth = this.currentSize;
+				this.overlayCtx.setLineDash([6,4]);
+				const ctx = this.overlayCtx;
+				ctx.beginPath();
+				if (this.currentTool === 'line' || this.currentTool === 'measure') {
+					ctx.moveTo(start.x, start.y);
+					ctx.lineTo(end.x, end.y);
+					ctx.stroke();
+					if (this.currentTool === 'measure') {
+						const dx = end.x - start.x, dy = end.y - start.y;
+						const dist = Math.sqrt(dx*dx + dy*dy).toFixed(1) + ' px';
+						ctx.fillStyle = 'rgba(0,0,0,0.6)';
+						ctx.setLineDash([]);
+						ctx.font = '12px Segoe UI';
+						ctx.fillRect(end.x+6, end.y-18, ctx.measureText(dist).width + 8, 18);
+						ctx.fillStyle = '#fff';
+						ctx.fillText(dist, end.x+10, end.y-5);
+					}
+				} else if (this.currentTool === 'rect') {
+					ctx.strokeRect(Math.min(start.x, end.x), Math.min(start.y, end.y), Math.abs(end.x-start.x), Math.abs(end.y-start.y));
+				} else if (this.currentTool === 'ellipse') {
+					const rx = (end.x - start.x) / 2; const ry = (end.y - start.y) / 2; const cx = start.x + rx; const cy = start.y + ry;
+					ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI*2);
+					ctx.stroke();
+				}
+				ctx.setLineDash([]);
+				if (this.symmetryEnabled) {
+					// Mirror preview horizontally
+					const w = this.canvas.width;
+					const ms = { x: w - start.x, y: start.y };
+					const me = { x: w - end.x, y: end.y };
+					this.currentTool = this.currentTool; // no-op for clarity
+					// Draw mirror by temporarily setting tool and calling recursively
+					// Simplify: only mirror for line/rect/ellipse visually
+					if (['line','rect','ellipse','measure'].includes(this.currentTool)) {
+						const saveTool = this.currentTool;
+						this.currentTool = saveTool;
+						// draw mirrored
+						if (saveTool === 'line' || saveTool === 'measure') {
+							ctx.beginPath(); ctx.moveTo(ms.x, ms.y); ctx.lineTo(me.x, me.y); ctx.stroke();
+						} else if (saveTool === 'rect') {
+							ctx.strokeRect(Math.min(ms.x, me.x), Math.min(ms.y, me.y), Math.abs(me.x-ms.x), Math.abs(me.y-ms.y));
+						} else if (saveTool === 'ellipse') {
+							const rx2 = (me.x - ms.x)/2; const ry2 = (me.y - ms.y)/2; const cx2 = ms.x + rx2; const cy2 = ms.y + ry2;
+							ctx.beginPath(); ctx.ellipse(cx2, cy2, Math.abs(rx2), Math.abs(ry2), 0, 0, Math.PI*2); ctx.stroke();
+						}
+					}
+				}
+			}
+
+			commitShapeFromOverlay() {
+				const ctx = this.currentLayerCtx;
+				ctx.globalAlpha = this.currentOpacity;
+				ctx.drawImage(this.overlay, 0, 0);
+			}
+
+			drawTextAt(x, y) {
+				const ctx = this.currentLayerCtx;
+				ctx.globalAlpha = this.currentOpacity;
+				ctx.fillStyle = this.currentColor;
+				ctx.font = `${Math.max(10, this.currentSize*4)}px Segoe UI`;
+				ctx.textBaseline = 'top';
+				ctx.fillText(this.textValue || 'Text', x, y);
+			}
+
+			// Composite draw
+			drawComposite() {
+				// Clear base
+				this.ctx.fillStyle = '#ffffff';
+				this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+				// Draw layers in order
+				this.layers.forEach(layer => this.ctx.drawImage(layer, 0, 0));
+				// Grid
+				if (this.gridEnabled) this.drawGrid();
+				// Mannequin
+				if (this.mannequinEnabled) this.drawMannequinGuide();
+			}
+
+			drawGrid() {
+				const step = 25; // px
+				this.ctx.save();
+				this.ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+				this.ctx.lineWidth = 1;
+				for (let x=0; x<this.canvas.width; x+=step) { this.ctx.beginPath(); this.ctx.moveTo(x,0); this.ctx.lineTo(x,this.canvas.height); this.ctx.stroke(); }
+				for (let y=0; y<this.canvas.height; y+=step) { this.ctx.beginPath(); this.ctx.moveTo(0,y); this.ctx.lineTo(this.canvas.width,y); this.ctx.stroke(); }
+				this.ctx.restore();
+			}
+
+			drawMannequinGuide() {
+				const c = this.ctx; const w = this.canvas.width; const h = this.canvas.height; const cx = w/2;
+				c.save();
+				c.strokeStyle = 'rgba(231, 76, 60, 0.35)';
+				c.fillStyle = 'rgba(231, 76, 60, 0.08)';
+				c.lineWidth = 2;
+				// center line
+				c.beginPath(); c.moveTo(cx, 0); c.lineTo(cx, h); c.stroke();
+				// shoulders, waist, hips ellipses
+				const drawEllipse = (y, rx, ry) => { c.beginPath(); c.ellipse(cx, y, rx, ry, 0, 0, Math.PI*2); c.stroke(); };
+				drawEllipse(h*0.2, 80, 18); // shoulders
+				drawEllipse(h*0.4, 55, 16); // waist
+				drawEllipse(h*0.55, 80, 22); // hips
+				c.restore();
+			}
+
+			// History of composites
+			saveState() {
+				// snapshot composite
+				const snapshot = document.createElement('canvas');
+				snapshot.width = this.canvas.width; snapshot.height = this.canvas.height;
+				snapshot.getContext('2d').drawImage(this.canvas, 0, 0);
+				if (this.historyIndex < this.history.length - 1) this.history = this.history.slice(0, this.historyIndex + 1);
+				this.history.push(snapshot);
+				this.historyIndex++;
+				if (this.history.length > this.maxHistory) { this.history.shift(); this.historyIndex--; }
+			}
+
+			undo() {
+				if (this.historyIndex > 0) {
+					this.historyIndex--;
+					const snap = this.history[this.historyIndex];
+					// Replace layers with snapshot to keep state consistent
+					this.layers = [];
+					this.addLayer('Snapshot');
+					this.currentLayerCtx.clearRect(0,0,this.canvas.width,this.canvas.height);
+					this.currentLayerCtx.drawImage(snap, 0, 0);
+					this.drawComposite();
+				}
+			}
+
+			redo() {
+				if (this.historyIndex < this.history.length - 1) {
+					this.historyIndex++;
+					const snap = this.history[this.historyIndex];
+					this.layers = [];
+					this.addLayer('Snapshot');
+					this.currentLayerCtx.clearRect(0,0,this.canvas.width,this.canvas.height);
+					this.currentLayerCtx.drawImage(snap, 0, 0);
+					this.drawComposite();
+				}
+			}
+
+			clearCanvas() {
+				this.layers.forEach(l => l.getContext('2d').clearRect(0,0,l.width,l.height));
+				this.drawComposite();
+				this.saveState();
+			}
+
+			// Import/Export
+			exportPNG() {
+				const link = document.createElement('a');
+				link.download = `fashion-canvas-${Date.now()}.png`;
+				link.href = this.canvas.toDataURL('image/png');
+				link.click();
+			}
+
+			importImage(e) {
+				const file = e.target.files && e.target.files[0];
+				if (!file) return;
+				const img = new Image();
+				img.onload = () => {
+					this.addLayer(file.name || 'Image');
+					const ctx = this.currentLayerCtx;
+					// Fit image within canvas preserving aspect ratio
+					const scale = Math.min(this.canvas.width / img.width, this.canvas.height / img.height, 1);
+					const dw = img.width * scale, dh = img.height * scale;
+					const dx = (this.canvas.width - dw) / 2, dy = (this.canvas.height - dh) / 2;
+					ctx.drawImage(img, dx, dy, dw, dh);
+					this.drawComposite();
+					this.saveState();
+				};
+				img.src = URL.createObjectURL(file);
+			}
+
+			// Project sketch persistence (uses server API)
+			async saveSketch() {
+				const projectId = document.getElementById('projectId').value;
+				const sketchName = document.getElementById('sketchName').value;
+				if (!projectId || !sketchName) { this.showNotification('Please enter both Project ID and Sketch Name', 'error'); return; }
+				try {
+					const imageData = this.canvas.toDataURL('image/png');
+					const sketchId = `sketch-${Date.now()}`;
+					const response = await fetch('/api/sketches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: sketchId, name: sketchName, data: imageData, projectId }) });
+					if (response.ok) { this.showNotification('Sketch saved successfully!'); document.getElementById('sketchName').value = ''; } else { throw new Error('Failed to save sketch'); }
+				} catch (error) { this.showNotification('Error saving sketch: ' + error.message, 'error'); }
+			}
+
+			async loadSketch() {
+				const projectId = document.getElementById('projectId').value;
+				const sketchName = document.getElementById('sketchName').value;
+				if (!projectId || !sketchName) { this.showNotification('Please enter both Project ID and Sketch Name', 'error'); return; }
+				try {
+					const listResponse = await fetch(`/api/projects/${projectId}/sketches`);
+					if (!listResponse.ok) throw new Error('Failed to fetch sketches');
+					const { sketches } = await listResponse.json();
+					const sketch = sketches.find(s => s.name === sketchName);
+					if (!sketch) { this.showNotification('Sketch not found', 'error'); return; }
+					const loadResponse = await fetch(`/api/sketches/${sketch.id}`);
+					if (!loadResponse.ok) throw new Error('Failed to load sketch');
+					const { sketch: sketchData } = await loadResponse.json();
+					const img = new Image();
+					img.onload = () => {
+						this.layers = [];
+						this.addLayer(sketch.name);
+						this.currentLayerCtx.drawImage(img, 0, 0, this.canvas.width, this.canvas.height);
+						this.drawComposite();
+						this.saveState();
+						this.showNotification('Sketch loaded successfully!');
+					};
+					img.src = sketchData.data;
+				} catch (error) { this.showNotification('Error loading sketch: ' + error.message, 'error'); }
+			}
+
+			async listSketches() {
+				const projectId = document.getElementById('projectId').value;
+				if (!projectId) { this.showNotification('Please enter Project ID', 'error'); return; }
+				try {
+					const response = await fetch(`/api/projects/${projectId}/sketches`);
+					if (!response.ok) throw new Error('Failed to fetch sketches');
+					const { sketches } = await response.json();
+					this.displaySketchList(sketches);
+					if (sketches.length === 0) this.showNotification('No sketches found for this project');
+				} catch (error) { this.showNotification('Error listing sketches: ' + error.message, 'error'); }
+			}
+
+			displaySketchList(sketches) {
+				const listContainer = document.getElementById('sketchList');
+				listContainer.innerHTML = '';
+				sketches.forEach(sketch => {
+					const item = document.createElement('div');
+					item.className = 'sketch-item';
+					item.innerHTML = `<h4>${sketch.name}</h4><p>Created: ${new Date(sketch.createdAt).toLocaleDateString()}</p>`;
+					item.addEventListener('click', () => { document.getElementById('sketchName').value = sketch.name; });
+					listContainer.appendChild(item);
+				});
+			}
+
+			async deleteSketch() {
+				const projectId = document.getElementById('projectId').value;
+				const sketchName = document.getElementById('sketchName').value;
+				if (!projectId || !sketchName) { this.showNotification('Please enter both Project ID and Sketch Name', 'error'); return; }
+				try {
+					const listResponse = await fetch(`/api/projects/${projectId}/sketches`);
+					if (!listResponse.ok) throw new Error('Failed to fetch sketches');
+					const { sketches } = await listResponse.json();
+					const sketch = sketches.find(s => s.name === sketchName);
+					if (!sketch) { this.showNotification('Sketch not found', 'error'); return; }
+					const deleteResponse = await fetch(`/api/sketches/${sketch.id}`, { method: 'DELETE' });
+					if (deleteResponse.ok) { this.showNotification('Sketch deleted successfully!'); document.getElementById('sketchName').value = ''; this.listSketches(); } else { throw new Error('Failed to delete sketch'); }
+				} catch (error) { this.showNotification('Error deleting sketch: ' + error.message, 'error'); }
+			}
+
+			showNotification(message, type = 'success') {
+				const notification = document.getElementById('notification');
+				notification.textContent = message;
+				notification.className = `notification ${type}`;
+				notification.classList.add('show');
+				setTimeout(() => notification.classList.remove('show'), 3000);
+			}
+		}
+
+		// Initialize
+		document.addEventListener('DOMContentLoaded', () => { new FashionCanvas(); });
+	</script>
 </body>
 </html>
